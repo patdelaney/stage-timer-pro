@@ -1,0 +1,553 @@
+diff --git a/public/index.html b/public/index.html
+index 238e002..a8147d5 100644
+--- a/public/index.html
++++ b/public/index.html
+@@ -158,6 +158,12 @@
+                     <button onclick="updateFirmware()" class="sys-btn sys-btn-warn" style="flex: 1;">PULL FIRMWARE UPDATE (GIT)</button>
+                 </div>
+             </div>
++
++            <div class="sys-group">
++                <h3>Webhooks</h3>
++                <p style="font-size: 11px; color: var(--text-dim); margin-top: -10px; margin-bottom: 15px;">Trigger external systems when the timer starts, pauses, hits 00:00, or switches to/from the logo screen.</p>
++                <a href="/webhooks.html" class="sys-btn" style="display:block; text-align:center; text-decoration:none;">OPEN WEBHOOK CONFIGURATION →</a>
++            </div>
+         </div>
+     </div>
+ 
+@@ -206,6 +212,14 @@
+                         <button onclick="api('mode', '?set=timeofday')" class="btn-preset" id="mode-timeofday">Time of Day</button>
+                         <button onclick="api('mode', '?set=logo')" class="btn-preset" id="mode-logo">Idle / Logo</button>
+                     </div>
++                    <button id="btn-hold-zero" onclick="api('settings/hold_at_zero/toggle')" class="btn btn-toggle btn-toggle-off">HOLD AT 00:00</button>
++                    <button id="btn-auto-logo-zero" onclick="api('settings/auto_logo_at_zero/toggle')" class="btn btn-toggle btn-toggle-off">DISSOLVE TO LOGO AT 00:00</button>
++                    <div style="display:flex; align-items:center; gap:10px; margin-top:10px;">
++                        <label for="dissolve-delay-input" style="font-size:12px; color:var(--text-dim); white-space:nowrap;">Delay before dissolve (sec)</label>
++                        <input id="dissolve-delay-input" type="number" min="0" max="3600" step="1"
++                               class="sys-input" style="width:80px;"
++                               onchange="setDissolveDelay()">
++                    </div>
+                 </section>
+ 
+                 <section class="card">
+@@ -339,12 +353,21 @@
+ 
+         function updateMsgText(){ fetch(`/api/message/set?text=${encodeURIComponent(document.getElementById('minput').value)}`); }
+         function setCustomTime() { const mins = document.getElementById('custom-min').value; if (mins) api('reset', parseInt(mins) * 60); }
++
++        function setDissolveDelay() {
++            const val = document.getElementById('dissolve-delay-input').value;
++            if (val !== "") api('settings/dissolve_delay', '?sec=' + parseInt(val));
++        }
+         function addQuickMessage() {
+             const text = document.getElementById('minput').value.trim();
+             if(text) { fetch(`/api/messages/add?text=${encodeURIComponent(text)}`); document.getElementById('minput').value = ''; }
+         }
+ 
+-        function openSettings() { document.getElementById('settings-modal').classList.add('active'); checkAPStatus(); }
++        function openSettings() {
++            document.getElementById('settings-modal').classList.add('active');
++            checkAPStatus();
++        }
++
+         function closeSettings() { document.getElementById('settings-modal').classList.remove('active'); }
+         function confirmRestart() { fetch('/api/system/restart'); document.getElementById('restart-modal').classList.remove('active'); setTimeout(() => { window.location.reload(); }, 4000); }
+         
+@@ -490,6 +513,21 @@
+             if(s.showMessage) { badge.innerText = "LIVE ON STAGE"; badge.className = "msg-status-badge status-live"; toggleBtn.innerText = "HIDE MESSAGE"; toggleBtn.className = "btn btn-toggle btn-toggle-on"; } 
+             else { badge.innerText = "OFF AIR"; badge.className = "msg-status-badge status-off"; toggleBtn.innerText = "SHOW MESSAGE"; toggleBtn.className = "btn btn-toggle btn-toggle-off"; }
+ 
++            const holdZeroBtn = document.getElementById('btn-hold-zero');
++            if (holdZeroBtn) {
++                holdZeroBtn.className = s.holdAtZero ? "btn btn-toggle btn-toggle-on" : "btn btn-toggle btn-toggle-off";
++            }
++
++            const autoLogoBtn = document.getElementById('btn-auto-logo-zero');
++            if (autoLogoBtn) {
++                autoLogoBtn.className = s.autoLogoAtZero ? "btn btn-toggle btn-toggle-on" : "btn btn-toggle btn-toggle-off";
++            }
++
++            const dissolveDelayInput = document.getElementById('dissolve-delay-input');
++            if (dissolveDelayInput && document.activeElement !== dissolveDelayInput) {
++                dissolveDelayInput.value = s.dissolveDelaySec;
++            }
++
+             document.getElementById('b-start').classList.toggle('hidden', s.isRunning);
+             document.getElementById('b-pause').classList.toggle('hidden', !s.isRunning);
+         });
+diff --git a/public/presenter.html b/public/presenter.html
+index 12ee926..35885eb 100644
+--- a/public/presenter.html
++++ b/public/presenter.html
+@@ -33,7 +33,8 @@
+             box-sizing: border-box;
+         }
+ 
+-        #clock-container { width: 100%; display: flex; justify-content: center; align-items: center; }
++        #clock-container { width: 100%; display: flex; justify-content: center; align-items: center; opacity: 1; transition: opacity 1.2s ease; }
++        #logo-display { opacity: 0; transition: opacity 1.2s ease; }
+ 
+         /* The font-family here adds system-level monospace fallbacks so it stays smooth offline! */
+         #clock { 
+@@ -81,7 +82,7 @@
+ <body>
+     <div id="ip-overlay">Connecting...</div>
+ 
+-    <img id="logo-display" src="" style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); max-width: 85vw; max-height: 85vh; object-fit: contain; display: none;">
++    <img id="logo-display" src="" style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); max-width: 100vw; max-height: 100vh; object-fit: contain;">
+ 
+     <div id="clock-container"><div id="clock">10:00</div></div>
+     
+@@ -117,8 +118,9 @@
+             document.body.className = '';
+ 
+             if (state.mode === 'timeofday') {
+-                logoDisplay.style.display = 'none';
+-                document.getElementById('clock-container').style.display = 'flex';
++                logoDisplay.style.opacity = '0';
++                logoDisplay.style.pointerEvents = 'none';
++                document.getElementById('clock-container').style.opacity = '1';
+                 if (!localTimeInterval) {
+                     localTimeInterval = setInterval(() => {
+                         if(currentMode === 'timeofday') {
+@@ -137,11 +139,13 @@
+                     if (logoDisplay.getAttribute('src') !== state.logoData) {
+                         logoDisplay.setAttribute('src', state.logoData);
+                     }
+-                    logoDisplay.style.display = 'block';
+-                    document.getElementById('clock-container').style.display = 'none';
++                    logoDisplay.style.opacity = '1';
++                    logoDisplay.style.pointerEvents = 'auto';
++                    document.getElementById('clock-container').style.opacity = '0';
+                 } else {
+-                    logoDisplay.style.display = 'none';
+-                    document.getElementById('clock-container').style.display = 'flex';
++                    logoDisplay.style.opacity = '0';
++                    logoDisplay.style.pointerEvents = 'none';
++                    document.getElementById('clock-container').style.opacity = '1';
+                     clock.innerText = "EVENT LOGO";
+                     clock.style.fontSize = "12vw";
+                     clock.style.opacity = "0.5";
+@@ -149,8 +153,9 @@
+                 document.getElementById('progress-container').style.display = 'none';
+ 
+             } else {
+-                logoDisplay.style.display = 'none';
+-                document.getElementById('clock-container').style.display = 'flex';
++                logoDisplay.style.opacity = '0';
++                logoDisplay.style.pointerEvents = 'none';
++                document.getElementById('clock-container').style.opacity = '1';
+                 document.getElementById('progress-container').style.display = 'block';
+                 const absTime = Math.abs(state.timeLeft);
+                 const mins = Math.floor(absTime / 60);
+diff --git a/public/webhooks.html b/public/webhooks.html
+new file mode 100644
+index 0000000..1c1c9cf
+--- /dev/null
++++ b/public/webhooks.html
+@@ -0,0 +1,165 @@
++<!DOCTYPE html>
++<html lang="en">
++<head>
++    <meta charset="UTF-8">
++    <title>Webhook Configuration | Stage Timer Pro</title>
++    <meta name="viewport" content="width=device-width, initial-scale=1.0">
++    <link rel="apple-touch-icon" href="/icon.svg">
++    <style>
++        :root {
++            --bg: #0f172a; --card: #1e293b; --border: #334155;
++            --text: #f8fafc; --text-dim: #94a3b8; --blue: #2563eb;
++            --green: #16a34a; --amber: #d97706; --red: #dc2626;
++        }
++        * { box-sizing: border-box; }
++        body { font-family: sans-serif; background: var(--bg); color: var(--text); margin: 0; padding: 20px; }
++        .container { max-width: 800px; margin: 0 auto; }
++
++        header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px; gap: 15px; }
++        header h1 { font-size: 18px; margin: 0; }
++        .back-link { color: var(--text-dim); text-decoration: none; font-size: 13px; white-space: nowrap; }
++        .back-link:hover { color: var(--text); }
++
++        .intro { color: var(--text-dim); font-size: 13px; line-height: 1.5; margin-bottom: 25px; }
++
++        .hook-card { background: var(--card); border: 1px solid var(--border); border-radius: 16px; padding: 20px; margin-bottom: 16px; }
++        .hook-card h2 { font-size: 14px; margin: 0 0 4px 0; }
++        .hook-card .event-key { font-family: monospace; font-size: 11px; color: var(--text-dim); margin: 0 0 15px 0; }
++
++        .row { display: flex; gap: 10px; }
++        .sys-input { flex: 1; background: #0f172a; border: 1px solid var(--border); color: #fff; padding: 12px; border-radius: 8px; font-family: monospace; font-size: 13px; }
++        .sys-input:focus { outline: none; border-color: var(--blue); }
++        .btn { border: none; border-radius: 8px; cursor: pointer; font-weight: 700; padding: 0 18px; color: #fff; font-size: 13px; white-space: nowrap; }
++        .btn-save { background: var(--blue); }
++        .btn-test { background: #475569; }
++        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
++
++        .status-line { margin-top: 12px; font-size: 12px; display: flex; align-items: center; gap: 8px; min-height: 16px; }
++        .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
++        .dot-idle { background: var(--border); }
++        .dot-ok { background: var(--green); }
++        .dot-fail { background: var(--red); }
++        .status-text { color: var(--text-dim); }
++        .feedback { font-size: 12px; margin-top: 8px; min-height: 14px; }
++    </style>
++</head>
++<body>
++    <div class="container">
++        <header>
++            <h1>⚡ Webhook Configuration</h1>
++            <a href="/" class="back-link">← Back to Control Panel</a>
++        </header>
++
++        <p class="intro">
++            Each event below can fire a plain HTTP <strong>GET</strong> request to a URL of your choice, letting an external
++            system react to what the timer is doing. Leave a field blank to disable that event. Requests time out after 5 seconds
++            and failures are logged but never retried, so a broken endpoint can't affect the timer itself.
++        </p>
++
++        <div id="hooks-container"></div>
++    </div>
++
++    <script>
++        const EVENTS = ['on_start', 'on_pause', 'on_zero', 'on_logo_enter', 'on_logo_exit'];
++        const FALLBACK_LABELS = {
++            on_start: 'Timer Start',
++            on_pause: 'Timer Pause',
++            on_zero: 'Timer Hits 00:00',
++            on_logo_enter: 'Switches To Logo Screen',
++            on_logo_exit: 'Switches Away From Logo Screen'
++        };
++
++        function timeAgo(ts) {
++            if (!ts) return 'Never fired';
++            const secs = Math.floor((Date.now() - ts) / 1000);
++            if (secs < 5) return 'Just now';
++            if (secs < 60) return `${secs}s ago`;
++            const mins = Math.floor(secs / 60);
++            if (mins < 60) return `${mins}m ago`;
++            const hrs = Math.floor(mins / 60);
++            if (hrs < 24) return `${hrs}h ago`;
++            return new Date(ts).toLocaleString();
++        }
++
++        function renderCard(event, data) {
++            const label = data.label || FALLBACK_LABELS[event];
++            const dotClass = data.lastFiredAt === null ? 'dot-idle' : (data.ok ? 'dot-ok' : 'dot-fail');
++            const statusText = data.lastFiredAt === null
++                ? 'Never fired'
++                : `${data.ok ? 'Succeeded' : 'Failed'} · ${timeAgo(data.lastFiredAt)}${data.error ? ' · ' + data.error : ''}`;
++
++            return `
++                <div class="hook-card" data-event="${event}">
++                    <h2>${label}</h2>
++                    <p class="event-key">${event}</p>
++                    <div class="row">
++                        <input type="text" class="sys-input" id="input-${event}" placeholder="https://example.com/hook" value="${data.url || ''}">
++                        <button class="btn btn-save" onclick="saveWebhook('${event}')">SAVE</button>
++                        <button class="btn btn-test" onclick="testWebhook('${event}')" ${data.url ? '' : 'disabled'} id="testbtn-${event}">TEST</button>
++                    </div>
++                    <div class="status-line">
++                        <span class="dot ${dotClass}" id="dot-${event}"></span>
++                        <span class="status-text" id="statustext-${event}">${statusText}</span>
++                    </div>
++                    <div class="feedback" id="feedback-${event}"></div>
++                </div>
++            `;
++        }
++
++        async function loadWebhooks() {
++            // Don't blow away an input the user is actively editing (e.g. mid-typing a URL)
++            const active = document.activeElement;
++            if (active && active.tagName === 'INPUT' && active.id.startsWith('input-')) return;
++
++            try {
++                const res = await fetch('/api/webhooks');
++                const hooks = await res.json();
++                const container = document.getElementById('hooks-container');
++                container.innerHTML = EVENTS.map(event => renderCard(event, hooks[event] || {})).join('');
++            } catch (e) {
++                document.getElementById('hooks-container').innerHTML =
++                    `<p style="color:var(--red);">Could not load webhook configuration: ${e.message}</p>`;
++            }
++        }
++
++        function showFeedback(event, message, isError) {
++            const el = document.getElementById(`feedback-${event}`);
++            el.style.color = isError ? 'var(--red)' : 'var(--green)';
++            el.innerText = message;
++            setTimeout(() => { el.innerText = ''; }, 4000);
++        }
++
++        async function saveWebhook(event) {
++            const input = document.getElementById(`input-${event}`);
++            try {
++                const res = await fetch(`/api/webhooks/set?event=${event}&url=${encodeURIComponent(input.value)}`);
++                const text = await res.text();
++                if (res.ok) {
++                    showFeedback(event, 'Saved.', false);
++                    document.getElementById(`testbtn-${event}`).disabled = !input.value;
++                } else {
++                    showFeedback(event, text, true);
++                }
++            } catch (e) {
++                showFeedback(event, 'Save failed: ' + e.message, true);
++            }
++        }
++
++        async function testWebhook(event) {
++            try {
++                const res = await fetch(`/api/webhooks/test?event=${event}`);
++                const text = await res.text();
++                showFeedback(event, text, !res.ok);
++                // Give the fire-and-forget request a moment to complete, then refresh its status dot
++                setTimeout(loadWebhooks, 1200);
++            } catch (e) {
++                showFeedback(event, 'Test failed: ' + e.message, true);
++            }
++        }
++
++        loadWebhooks();
++        // Keep status dots current if a webhook fires from real timer activity elsewhere
++        setInterval(loadWebhooks, 8000);
++    </script>
++</body>
++</html>
+diff --git a/server.js b/server.js
+index b6f1253..53db711 100644
+--- a/server.js
++++ b/server.js
+@@ -37,9 +37,11 @@ const netInfo = getNetworkInfo();
+ // --- PERSISTENCE SETUP ---
+ const messagesFile = path.join(__dirname, 'messages.json');
+ const logoFile = path.join(__dirname, 'logo.json');
++const webhooksFile = path.join(__dirname, 'webhooks.json');
+ 
+ let quickMessages = ['Wrap Up Now', 'Q&A Starting', '5 Minutes Left', 'Speak Up'];
+ let logoData = "";
++let webhooks = { on_start: "", on_pause: "", on_zero: "", on_logo_enter: "", on_logo_exit: "" };
+ 
+ // Load Messages
+ try {
+@@ -67,6 +69,52 @@ try {
+     console.error("Could not load logo.json", e);
+ }
+ 
++// Load Webhooks
++try {
++    if (fs.existsSync(webhooksFile)) {
++        const parsed = JSON.parse(fs.readFileSync(webhooksFile, 'utf8'));
++        webhooks = { ...webhooks, ...parsed };
++    } else {
++        fs.writeFileSync(webhooksFile, JSON.stringify(webhooks));
++    }
++} catch (e) {
++    console.error("Could not load webhooks.json", e);
++}
++
++function saveWebhooks() {
++    try { fs.writeFileSync(webhooksFile, JSON.stringify(webhooks)); }
++    catch (e) { console.error("Could not save webhooks.json", e); }
++}
++
++// In-memory only (not persisted): last-fired outcome per event, for the config page to display.
++const WEBHOOK_EVENTS = ['on_start', 'on_pause', 'on_zero', 'on_logo_enter', 'on_logo_exit'];
++let webhookStatus = {};
++WEBHOOK_EVENTS.forEach(e => webhookStatus[e] = { lastFiredAt: null, ok: null, error: null });
++
++// Fire-and-forget GET to a configured webhook URL for a given event.
++// Never throws, never blocks the caller, and logs failures instead of retrying,
++// so a slow or unreachable external system can never stall the timer.
++function fireWebhook(event) {
++    const url = webhooks[event];
++    if (!url) return;
++    try {
++        const controller = new AbortController();
++        const timeout = setTimeout(() => controller.abort(), 5000);
++        fetch(url, { method: 'GET', signal: controller.signal })
++            .then(res => {
++                webhookStatus[event] = { lastFiredAt: Date.now(), ok: res.ok, error: res.ok ? null : `HTTP ${res.status}` };
++            })
++            .catch(err => {
++                webhookStatus[event] = { lastFiredAt: Date.now(), ok: false, error: err.message };
++                console.error(`Webhook [${event}] failed:`, err.message);
++            })
++            .finally(() => clearTimeout(timeout));
++    } catch (e) {
++        webhookStatus[event] = { lastFiredAt: Date.now(), ok: false, error: e.message };
++        console.error(`Webhook [${event}] error:`, e.message);
++    }
++}
++
+ // --- APP STATE ---
+ let state = {
+     timeLeft: 600,
+@@ -78,14 +126,49 @@ let state = {
+     ip: netInfo.ip,
+     netmask: netInfo.mask,
+     logoData: logoData,
+-    blink_state: false
++    blink_state: false,
++    holdAtZero: false,
++    autoLogoAtZero: false,
++    dissolveDelaySec: 5
+ };
+ 
++// Centralizes every mode change so logo enter/exit webhooks fire consistently,
++// whether the switch was manual (/api/mode) or automatic (auto-dissolve at zero).
++function setMode(newMode) {
++    const oldMode = state.mode;
++    if (newMode === oldMode) return;
++    state.mode = newMode;
++    if (newMode === 'logo' && oldMode !== 'logo') fireWebhook('on_logo_enter');
++    if (oldMode === 'logo' && newMode !== 'logo') fireWebhook('on_logo_exit');
++}
++
+ // --- GLOBAL TICK ENGINES ---
++let secondsPastZero = null; // null = not currently counting down toward the dissolve
++
+ // Standard Timer Tick (1 Second)
+ setInterval(() => {
+     if (state.isRunning) {
+-        if (state.mode === 'countdown') state.timeLeft--;
++        if (state.mode === 'countdown') {
++            const wasPositive = state.timeLeft > 0;
++            if (state.holdAtZero && state.timeLeft <= 0) {
++                state.timeLeft = 0; // clamp: stay at 00:00 instead of going negative
++            } else {
++                state.timeLeft--;
++            }
++
++            if (wasPositive && state.timeLeft <= 0) {
++                secondsPastZero = 0; // just crossed the zero boundary, start the delay clock
++                fireWebhook('on_zero');
++            } else if (secondsPastZero !== null) {
++                secondsPastZero++;
++            }
++
++            // Dissolve to the logo screen once the configured delay has elapsed
++            if (state.autoLogoAtZero && secondsPastZero !== null && secondsPastZero >= state.dissolveDelaySec) {
++                setMode('logo');
++                secondsPastZero = null;
++            }
++        }
+         else if (state.mode === 'countup') state.timeLeft++;
+         broadcast();
+     }
+@@ -127,18 +210,21 @@ app.get('/api/state', (req, res) => res.json(state));
+ 
+ app.get('/api/start', (req, res) => {
+     state.isRunning = true;
++    fireWebhook('on_start');
+     broadcast();
+     res.send('Started');
+ });
+ 
+ app.get('/api/pause', (req, res) => {
+     state.isRunning = false;
++    fireWebhook('on_pause');
+     broadcast();
+     res.send('Paused');
+ });
+ 
+ app.get('/api/toggle_playback', (req, res) => {
+     state.isRunning = !state.isRunning;
++    fireWebhook(state.isRunning ? 'on_start' : 'on_pause');
+     broadcast();
+     res.send(state.isRunning ? 'Started' : 'Paused');
+ });
+@@ -148,6 +234,7 @@ app.get('/api/reset', (req, res) => {
+     state.isRunning = false;
+     state.timeLeft = sec;
+     state.initialTime = sec;
++    secondsPastZero = null;
+     broadcast();
+     res.send('Reset');
+ });
+@@ -161,7 +248,8 @@ app.get('/api/add', (req, res) => {
+ app.get('/api/mode', (req, res) => {
+     const validModes = ['countdown', 'countup', 'timeofday', 'logo'];
+     if (validModes.includes(req.query.set)) {
+-        state.mode = req.query.set;
++        setMode(req.query.set);
++        secondsPastZero = null;
+         if (state.mode === 'countup') {
+             state.timeLeft = 0;
+             state.initialTime = 0;
+@@ -173,6 +261,78 @@ app.get('/api/mode', (req, res) => {
+     }
+ });
+ 
++app.get('/api/settings/hold_at_zero/toggle', (req, res) => {
++    state.holdAtZero = !state.holdAtZero;
++    broadcast();
++    res.send(state.holdAtZero ? 'Hold at Zero Enabled' : 'Hold at Zero Disabled');
++});
++
++app.get('/api/settings/auto_logo_at_zero/toggle', (req, res) => {
++    state.autoLogoAtZero = !state.autoLogoAtZero;
++    broadcast();
++    res.send(state.autoLogoAtZero ? 'Auto Logo at Zero Enabled' : 'Auto Logo at Zero Disabled');
++});
++
++app.get('/api/settings/dissolve_delay', (req, res) => {
++    const sec = parseInt(req.query.sec);
++    if (!isNaN(sec) && sec >= 0 && sec <= 3600) {
++        state.dissolveDelaySec = sec;
++        broadcast();
++        res.send('Dissolve Delay Updated');
++    } else {
++        res.status(400).send('Invalid Delay (0-3600 seconds)');
++    }
++});
++
++// --- WEBHOOKS ---
++const WEBHOOK_LABELS = {
++    on_start: 'Timer Start',
++    on_pause: 'Timer Pause',
++    on_zero: 'Timer Hits 00:00',
++    on_logo_enter: 'Switches To Logo Screen',
++    on_logo_exit: 'Switches Away From Logo Screen'
++};
++
++// Returns each event's URL, human label, and last-fired outcome, keyed by event name
++app.get('/api/webhooks', (req, res) => {
++    const combined = {};
++    WEBHOOK_EVENTS.forEach(event => {
++        combined[event] = {
++            label: WEBHOOK_LABELS[event],
++            url: webhooks[event] || "",
++            ...webhookStatus[event]
++        };
++    });
++    res.json(combined);
++});
++
++app.get('/api/webhooks/set', (req, res) => {
++    const event = req.query.event;
++    const url = req.query.url || "";
++    if (!WEBHOOK_EVENTS.includes(event)) {
++        return res.status(400).send('Invalid Event');
++    }
++    if (url && !/^https?:\/\//i.test(url)) {
++        return res.status(400).send('URL must start with http:// or https://');
++    }
++    webhooks[event] = url;
++    saveWebhooks();
++    res.json({ label: WEBHOOK_LABELS[event], url: webhooks[event], ...webhookStatus[event] });
++});
++
++// Fires the configured webhook for one event immediately, for testing from the UI
++app.get('/api/webhooks/test', (req, res) => {
++    const event = req.query.event;
++    if (!WEBHOOK_EVENTS.includes(event)) {
++        return res.status(400).send('Invalid Event');
++    }
++    if (!webhooks[event]) {
++        return res.status(400).send('No URL Configured For This Event');
++    }
++    fireWebhook(event);
++    res.send('Test Fired');
++});
++
+ app.get('/api/message/toggle', (req, res) => {
+     state.showMessage = !state.showMessage;
+     broadcast();
